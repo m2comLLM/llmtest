@@ -1,0 +1,23 @@
+# LlamaIndex Core
+llama-index>=0.10.0
+llama-index-core>=0.10.0
+
+# LlamaIndex Integrations
+llama-index-llms-ollama>=0.1.0
+llama-index-embeddings-huggingface>=0.1.0
+llama-index-vector-stores-chroma>=0.1.0
+
+# Embedding Model
+sentence-transformers>=2.2.0
+
+# Vector DB
+chromadb>=0.4.0
+
+# MinIO Client
+minio>=7.2.0
+
+# Web UI
+gradio>=4.0.0
+
+# Schema Validation
+pydantic>=2.0.0

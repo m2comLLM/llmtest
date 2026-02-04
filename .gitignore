@@ -1,0 +1,16 @@
+# Virtual environment
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ChromaDB local storage
+chroma_db/
+
+# Downloaded documents
+docs/
+
+# Environment variables
+.env
