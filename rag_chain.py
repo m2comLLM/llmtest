@@ -21,6 +21,11 @@ def get_today_korean() -> str:
 # 싱글톤 인스턴스
 _llm: Ollama | None = None
 
+# 페이지네이션 상태
+_last_search_results: list = []
+_last_search_offset: int = 0
+_last_search_query: str = ""
+
 def get_system_prompt() -> str:
     """Get system prompt with current date."""
     today = get_today_korean()
@@ -170,6 +175,59 @@ def parse_category_from_query(query: str) -> str | None:
     return None
 
 
+def parse_credits_from_query(query: str) -> tuple[int | None, str | None]:
+    """Extract credits (평점) info from query string.
+
+    Returns:
+        (credit_value, organization) - e.g., (4, "대한의사협회")
+    """
+    credit_value = None
+    organization = None
+
+    # 평점 숫자 파싱 (4점, 4평점 모두 인식)
+    credit_match = re.search(r"(\d+)\s*(?:평점|점)", query)
+    if credit_match:
+        credit_value = int(credit_match.group(1))
+
+    # 기관명 파싱
+    org_patterns = [
+        (r"대한의사협회|의사협회|의협", "대한의사협회"),
+        (r"내과분과|내과", "내과분과"),
+        (r"대한임상병리사협회|임상병리사", "대한임상병리사협회"),
+    ]
+    for pattern, org_name in org_patterns:
+        if re.search(pattern, query):
+            organization = org_name
+            break
+
+    return credit_value, organization
+
+
+def filter_nodes_by_credits(nodes: list, credit_value: int | None, organization: str | None) -> list:
+    """Filter nodes by credits (Python post-processing)."""
+    if credit_value is None and organization is None:
+        return nodes
+
+    filtered = []
+    for node in nodes:
+        metadata = node.metadata if hasattr(node, 'metadata') else {}
+        credits = metadata.get("credits", "")
+
+        # 평점 값 확인
+        if credit_value is not None:
+            if f"{credit_value}평점" not in credits and credits != str(credit_value):
+                continue
+
+        # 기관명 확인
+        if organization is not None:
+            if organization not in credits:
+                continue
+
+        filtered.append(node)
+
+    return filtered
+
+
 def parse_location_from_query(query: str) -> str | None:
     """Extract location keyword from query string."""
     location_patterns = [
@@ -234,11 +292,30 @@ def parse_duration_filter(query: str) -> str | None:
         "single_day": 하루 행사
         None: 필터 없음
     """
-    if re.search(r"며칠|여러\s*날|장기|이틀|[23]일|연속|동안\s*진행", query):
+    if re.search(r"며칠|여러\s*날|장기|이틀|[23]일간|연속|동안\s*진행", query):
         return "multi_day"
     if re.search(r"하루|당일|단기|하루\s*만", query):
         return "single_day"
     return None
+
+
+def is_pagination_request(query: str) -> bool:
+    """Check if query is asking for more results."""
+    patterns = [
+        r"더\s*(보여|알려|줘)",
+        r"추가로\s*(보여|알려|줘)",
+        r"다음\s*(목록|페이지|결과)",
+        r"나머지",
+        r"더\s*있",
+        r"계속",
+        r"다음으로",
+        r"추가\s*목록",
+        r"더\s*많이",
+    ]
+    for pattern in patterns:
+        if re.search(pattern, query):
+            return True
+    return False
 
 
 def parse_exclusion_filter(query: str) -> str | None:
@@ -455,6 +532,12 @@ def build_filter_description(query: str) -> str:
     if location:
         descriptions.append(f"장소: {location}")
 
+    credit_value, credit_org = parse_credits_from_query(query)
+    if credit_value is not None:
+        descriptions.append(f"평점: {credit_value}점")
+    if credit_org is not None:
+        descriptions.append(f"인정기관: {credit_org}")
+
     if is_time_based_query(query):
         descriptions.append("오늘 이후 행사")
 
@@ -494,13 +577,61 @@ def calculate_registration_status(metadata: dict) -> str:
         return "등록상태: 등록 마감"
 
 
-def format_nodes_as_context(nodes: list, max_nodes: int | None = None) -> str:
+def _handle_pagination_request(message: str) -> str:
+    """Handle request for more results from previous search."""
+    global _last_search_results, _last_search_offset, _last_search_query
+
+    max_docs = config.RETRIEVAL_K
+    total_count = len(_last_search_results)
+
+    # 다음 페이지 계산
+    start_idx = _last_search_offset
+    end_idx = min(start_idx + max_docs, total_count)
+
+    if start_idx >= total_count:
+        return f"더 이상 표시할 결과가 없습니다. (총 {total_count}개 모두 표시됨)"
+
+    # 다음 페이지 노드 가져오기
+    page_nodes = _last_search_results[start_idx:end_idx]
+    display_count = len(page_nodes)
+
+    # 오프셋 업데이트
+    _last_search_offset = end_idx
+
+    # 컨텍스트 생성 (번호는 전체 기준으로)
+    context = format_nodes_as_context(page_nodes, start_number=start_idx + 1)
+
+    llm = get_llm()
+    remaining = total_count - end_idx
+
+    prompt = f"""다음은 이전 검색 결과의 추가 목록입니다.
+
+[{start_idx + 1}번 ~ {end_idx}번 / 총 {total_count}개]
+
+{context}
+
+위 목록을 보기 좋게 정리해서 보여주세요.
+반드시 한국어로만 답변하세요.
+{f'(아직 {remaining}개 더 있습니다. "더 보여줘"로 확인 가능)' if remaining > 0 else '(마지막 페이지입니다)'}
+
+답변:"""
+
+    response = llm.complete(prompt)
+    result = str(response)
+
+    if remaining > 0:
+        result += f"\n\n---\n📄 {remaining}개의 결과가 더 있습니다. '더 보여줘'로 확인하세요."
+
+    return result
+
+
+def format_nodes_as_context(nodes: list, max_nodes: int | None = None, start_number: int = 1) -> str:
     """Format nodes as concise context string for LLM."""
     if max_nodes:
         nodes = nodes[:max_nodes]
 
     context_parts = []
-    for i, node in enumerate(nodes, 1):
+    for i, node in enumerate(nodes, start_number):
         metadata = node.metadata if hasattr(node, 'metadata') else {}
 
         # 간결한 포맷 사용
@@ -534,7 +665,13 @@ def chat(message: str) -> str:
     Returns:
         AI response string
     """
+    global _last_search_results, _last_search_offset, _last_search_query
+
     setup_settings()
+
+    # 페이지네이션 요청 처리
+    if is_pagination_request(message) and _last_search_results:
+        return _handle_pagination_request(message)
 
     # 쿼리에서 필터 추출
     chroma_filters = build_chroma_filters(message)
@@ -542,7 +679,10 @@ def chat(message: str) -> str:
     # 장소 필터 추출 (Python 후처리용)
     location = parse_location_from_query(message)
 
-    if chroma_filters or location:
+    # 평점 필터 추출 (Python 후처리용)
+    credit_value, credit_org = parse_credits_from_query(message)
+
+    if chroma_filters or location or credit_value is not None or credit_org is not None:
         if chroma_filters:
             # 필터가 있으면 ChromaDB에서 모든 매칭 문서 직접 조회
             nodes = get_all_by_filter(chroma_filters)
@@ -557,7 +697,15 @@ def chat(message: str) -> str:
             nodes = filter_nodes_by_location(nodes, location)
             print(f"[필터] 장소 필터 적용: {location}, 결과: {len(nodes)}개")
 
+        # 평점 필터 (Python 후처리)
+        if credit_value is not None or credit_org is not None:
+            nodes = filter_nodes_by_credits(nodes, credit_value, credit_org)
+            print(f"[필터] 평점 필터 적용: {credit_value}평점, {credit_org}, 결과: {len(nodes)}개")
+
         if not nodes:
+            _last_search_results = []
+            _last_search_offset = 0
+            _last_search_query = ""
             return "해당 조건에 맞는 문서를 찾을 수 없습니다."
 
         # 시간 기반 쿼리면 날짜순 정렬
@@ -565,12 +713,17 @@ def chat(message: str) -> str:
             nodes = sort_nodes_by_date(nodes, ascending=True)
             print(f"[정렬] 날짜순 정렬 완료")
 
+        # 검색 결과 저장 (페이지네이션용)
+        _last_search_results = nodes
+        _last_search_query = message
+        _last_search_offset = config.RETRIEVAL_K  # 첫 페이지 이후부터 시작
+
         # 문서 수 제한 (LLM 속도 최적화)
         max_docs = config.RETRIEVAL_K  # 기본 20개
         display_count = min(max_docs, len(nodes))
         total_count = len(nodes)
         context = format_nodes_as_context(nodes, max_nodes=max_docs)
-        print(f"[LLM] {display_count}개 문서 전달")
+        print(f"[LLM] {display_count}개 문서 전달 (총 {total_count}개)")
 
         # 적용된 필터 설명 생성
         filter_desc = build_filter_description(message)
@@ -593,7 +746,14 @@ def chat(message: str) -> str:
 답변:"""
 
         response = llm.complete(prompt)
-        return str(response)
+        result = str(response)
+
+        # 추가 결과 안내
+        remaining = total_count - display_count
+        if remaining > 0:
+            result += f"\n\n---\n📄 {remaining}개의 결과가 더 있습니다. '더 보여줘'로 확인하세요."
+
+        return result
 
     else:
         # 필터가 없으면 유사도 검색 사용
@@ -614,4 +774,8 @@ def chat(message: str) -> str:
 
 def reset_chat_engine() -> None:
     """Reset function (placeholder for compatibility)."""
+    global _last_search_results, _last_search_offset, _last_search_query
+    _last_search_results = []
+    _last_search_offset = 0
+    _last_search_query = ""
     print("[초기화] ChatEngine 리셋 완료")
