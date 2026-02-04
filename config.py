@@ -15,7 +15,7 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_db")
 
 # Ollama Settings
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "exaone3.5:32b")
 
 # Embedding Settings
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jhgan/ko-sroberta-multitask")

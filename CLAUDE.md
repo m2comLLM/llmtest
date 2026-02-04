@@ -14,7 +14,7 @@ hardware (NVIDIA GTX 1660 Super, 6GB VRAM).
 | Component     | Technology                  | Notes                          |
 | ------------- | --------------------------- | ------------------------------ |
 | LLM Engine    | Ollama                      | GGUF quantization support      |
-| Model         | Gemma-2-2B                  | Korean-capable small model     |
+| Model         | EXAONE 3.5 32B              | Korean-optimized LLM           |
 | Embedding     | jhgan/ko-sroberta-multitask | Korean sentence similarity     |
 | Vector DB     | ChromaDB                    | Local file-based storage       |
 | Storage       | MinIO                       | S3-compatible document storage |
@@ -71,7 +71,7 @@ docker run -d -p 9000:9000 -p 9001:9001 \
 
 ```bash
 # Install Ollama and pull the model
-ollama pull gemma2:2b
+ollama pull exaone3.5:32b
 ```
 
 **Hardware Requirements:**
